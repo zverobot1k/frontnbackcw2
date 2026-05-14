@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 
+	"somewebproject/internal/cache"
 	"somewebproject/internal/config"
 	"somewebproject/internal/middleware"
 	"somewebproject/internal/migration"
@@ -24,13 +25,20 @@ func main() {
 		log.Fatalf("run migration: %v", err)
 	}
 
+	// Initialize Redis cache
+	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
+	redisCache, err := cache.NewRedisCache(redisAddr)
+	if err != nil {
+		log.Fatalf("init redis: %v", err)
+	}
+
 	userRepo := repository.NewUserRepo(db)
 	productRepo := repository.NewProductRepo(db)
 
 	jwtSecret := getEnv("JWT_SECRET", "dev_secret")
 	authService := service.NewAuthService(userRepo, jwtSecret)
-	userService := service.NewUserService(userRepo)
-	productService := service.NewProductService(productRepo)
+	userService := service.NewUserService(userRepo, redisCache)
+	productService := service.NewProductService(productRepo, redisCache)
 
 	authHandler := transport.NewHandler(authService, userService)
 	productHandler := transport.NewProductHandler(productService)
