@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"somewebproject/internal/auth"
 	"somewebproject/internal/models"
@@ -32,7 +33,7 @@ func (h *ProductHandler) CreateProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	product, err := h.ProductService.Create(r.Context(), principal.ID, req.Name, req.Description, req.Price, req.Stock)
+	product, err := h.ProductService.Create(r.Context(), principal.ID, req.Name, req.Category, req.Description, req.Price, req.Stock)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -42,7 +43,31 @@ func (h *ProductHandler) CreateProduct(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ProductHandler) ListProducts(w http.ResponseWriter, r *http.Request) {
-	products, err := h.ProductService.List(r.Context())
+	filter := service.ProductListFilter{
+		Query:       strings.TrimSpace(r.URL.Query().Get("search")),
+		Category:    strings.TrimSpace(r.URL.Query().Get("category")),
+		OnlyInStock: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("in_stock")), "true"),
+	}
+
+	if minPriceText := strings.TrimSpace(r.URL.Query().Get("min_price")); minPriceText != "" {
+		minPrice, err := strconv.ParseFloat(minPriceText, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid min_price")
+			return
+		}
+		filter.MinPrice = &minPrice
+	}
+
+	if maxPriceText := strings.TrimSpace(r.URL.Query().Get("max_price")); maxPriceText != "" {
+		maxPrice, err := strconv.ParseFloat(maxPriceText, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid max_price")
+			return
+		}
+		filter.MaxPrice = &maxPrice
+	}
+
+	products, err := h.ProductService.List(r.Context(), filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -73,26 +98,9 @@ func (h *ProductHandler) GetProductByID(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *ProductHandler) UpdateProduct(w http.ResponseWriter, r *http.Request) {
-	principal, ok := auth.PrincipalFromContext(r.Context())
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-
 	id, err := parseProductID(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	product, err := h.ProductService.GetByID(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-
-	if product.OwnerID != principal.ID {
-		writeError(w, http.StatusForbidden, "you can update only your own products")
 		return
 	}
 
@@ -105,6 +113,9 @@ func (h *ProductHandler) UpdateProduct(w http.ResponseWriter, r *http.Request) {
 	updates := make(map[string]any)
 	if req.Name != nil {
 		updates["name"] = *req.Name
+	}
+	if req.Category != nil {
+		updates["category"] = *req.Category
 	}
 	if req.Description != nil {
 		updates["description"] = *req.Description
@@ -144,6 +155,7 @@ func toProductResponse(product *models.Product) ProductResponse {
 	return ProductResponse{
 		ID:          product.ID,
 		Name:        product.Name,
+		Category:    product.Category,
 		Description: product.Description,
 		Price:       product.Price,
 		Stock:       product.Stock,

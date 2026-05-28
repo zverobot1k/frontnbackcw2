@@ -1,53 +1,31 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
+const LOCAL_CART_KEY = "shop_cart_lines";
+const ACCESS_KEY = "access_token";
+const REFRESH_KEY = "refresh_token";
 
-const initialRegister = {
-  email: "",
-  password: "",
-  gender: "male",
-  age: 25,
-};
+const emptyAuth = { email: "", password: "", age: 25, gender: "unknown" };
+const emptyFilters = { search: "", category: "", minPrice: "", maxPrice: "", inStock: true };
+const emptyAdminCreate = { name: "", category: "general", description: "", price: "", stock: "" };
+const emptyAdminUpdate = { id: "", name: "", category: "", description: "", price: "", stock: "" };
 
-const initialLogin = {
-  email: "",
-  password: "",
-};
-
-const initialCreateProduct = {
-  name: "",
-  description: "",
-  price: 0,
-  stock: 0,
-};
-
-const initialUpdateProduct = {
-  id: "",
-  name: "",
-  description: "",
-  price: "",
-  stock: "",
-};
-
-const initialUpdateUser = {
-  id: "",
-  email: "",
-  age: "",
-  gender: "",
-  role: "",
-};
-
-function parseError(data, fallback) {
-  if (data && typeof data === "object" && typeof data.error === "string") {
-    return data.error;
+function readLocalJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch (_err) {
+    return fallback;
   }
-
-  return fallback;
 }
 
-function formatDate(value) {
-  if (!value) return "-";
-  return new Date(value).toLocaleString();
+function writeLocalJSON(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (_err) {
+    // no-op
+  }
 }
 
 function readToken(key) {
@@ -60,9 +38,9 @@ function readToken(key) {
 
 function writeToken(key, value) {
   try {
-    localStorage.setItem(key, value);
+    localStorage.setItem(key, value || "");
   } catch (_err) {
-    // Ignore localStorage failures in private mode.
+    // no-op
   }
 }
 
@@ -70,110 +48,68 @@ function clearToken(key) {
   try {
     localStorage.removeItem(key);
   } catch (_err) {
-    // Ignore localStorage failures in private mode.
+    // no-op
   }
 }
 
-function buildUpdatePayload(source, numericKeys = []) {
-  const payload = {};
+function parseError(payload, status) {
+  if (payload && typeof payload === "object" && typeof payload.error === "string") {
+    return payload.error;
+  }
 
-  Object.keys(source).forEach((key) => {
-    if (key === "id") return;
-
-    const value = source[key];
-    if (value === "" || value === null || value === undefined) return;
-
-    if (numericKeys.includes(key)) {
-      payload[key] = Number(value);
-      return;
-    }
-
-    payload[key] = value;
-  });
-
-  return payload;
+  return `request failed: ${status}`;
 }
 
-function UserBadge({ role }) {
-  return <span className={`badge role-${role || "guest"}`}>{role || "guest"}</span>;
+function toCurrency(value) {
+  return Number(value || 0).toLocaleString("ru-RU", { style: "currency", currency: "USD" });
 }
 
-function ProductCard({ product }) {
-  return (
-    <article className="item-card">
-      <div className="item-head">
-        <h4>{product.name}</h4>
-        <span>#{product.id}</span>
-      </div>
-      <p>{product.description || "Без описания"}</p>
-      <div className="meta-row">
-        <span>Цена: {product.price}</span>
-        <span>Остаток: {product.stock}</span>
-        <span>Продавец: {product.owner_id}</span>
-      </div>
-    </article>
-  );
+function toDate(value) {
+  if (!value) return "-";
+  return new Date(value).toLocaleString("ru-RU");
 }
 
-function UserCard({ user }) {
-  return (
-    <article className="item-card">
-      <div className="item-head">
-        <h4>{user.email}</h4>
-        <UserBadge role={user.role} />
-      </div>
-      <div className="meta-row">
-        <span>ID: {user.id}</span>
-        <span>Возраст: {user.age}</span>
-        <span>Пол: {user.gender || "-"}</span>
-        <span>Заблокирован: {user.is_blocked ? "Да" : "Нет"}</span>
-      </div>
-      <div className="meta-row">
-        <span>Создан: {formatDate(user.created_at)}</span>
-      </div>
-    </article>
-  );
+function roleTitle(role) {
+  if (role === "admin") return "admin";
+  if (role === "customer") return "customer";
+  return "guest";
 }
 
 export default function App() {
-  const [screen, setScreen] = useState("home");
-  const [status, setStatus] = useState("Готово к работе");
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("Готово");
+  const [screen, setScreen] = useState("catalog");
 
-  const [registerForm, setRegisterForm] = useState(initialRegister);
-  const [loginForm, setLoginForm] = useState(initialLogin);
-  const [createProductForm, setCreateProductForm] = useState(initialCreateProduct);
-  const [updateProductForm, setUpdateProductForm] = useState(initialUpdateProduct);
-  const [updateUserForm, setUpdateUserForm] = useState(initialUpdateUser);
-
-  const [productGetID, setProductGetID] = useState("");
-  const [productDeleteID, setProductDeleteID] = useState("");
-  const [userGetID, setUserGetID] = useState("");
-  const [userBlockID, setUserBlockID] = useState("");
-
-  const [accessToken, setAccessToken] = useState(() => readToken("access_token"));
-  const [refreshToken, setRefreshToken] = useState(() => readToken("refresh_token"));
+  const [authForm, setAuthForm] = useState(emptyAuth);
+  const [accessToken, setAccessToken] = useState(() => readToken(ACCESS_KEY));
+  const [refreshToken, setRefreshToken] = useState(() => readToken(REFRESH_KEY));
   const [currentUser, setCurrentUser] = useState(null);
 
+  const [filters, setFilters] = useState(emptyFilters);
   const [products, setProducts] = useState([]);
-  const [selectedProduct, setSelectedProduct] = useState(null);
-  const [users, setUsers] = useState([]);
-  const [selectedUser, setSelectedUser] = useState(null);
 
-  const isAuthenticated = Boolean(accessToken);
+  const [localCart, setLocalCart] = useState(() => readLocalJSON(LOCAL_CART_KEY, []));
+  const [cart, setCart] = useState({ items: [], total: 0 });
+  const [orders, setOrders] = useState([]);
+  const [adminOrders, setAdminOrders] = useState([]);
+
+  const [adminCreate, setAdminCreate] = useState(emptyAdminCreate);
+  const [adminUpdate, setAdminUpdate] = useState(emptyAdminUpdate);
+  const [deleteProductID, setDeleteProductID] = useState("");
+
+  const isAuth = Boolean(accessToken);
   const role = currentUser?.role || "guest";
   const isAdmin = role === "admin";
-  const isSeller = role === "seller";
-  const canCreateOrUpdateProduct = isSeller;
 
-  const navItems = useMemo(
+  const nav = useMemo(
     () => [
-      { key: "home", label: "Главная", enabled: true },
-      { key: "auth", label: "Аккаунт", enabled: true },
-      { key: "products", label: "Продукты", enabled: isAuthenticated },
+      { key: "catalog", label: "Каталог", enabled: true },
+      { key: "cart", label: "Корзина", enabled: true },
+      { key: "orders", label: "История", enabled: isAuth },
       { key: "admin", label: "Админ", enabled: isAdmin },
+      { key: "auth", label: isAuth ? "Профиль" : "Вход" , enabled: true },
     ],
-    [isAuthenticated, isAdmin]
+    [isAuth, isAdmin]
   );
 
   function authHeaders() {
@@ -197,7 +133,7 @@ export default function App() {
     }
 
     if (!response.ok) {
-      throw new Error(parseError(payload, `Ошибка запроса (${response.status})`));
+      throw new Error(parseError(payload, response.status));
     }
 
     return payload;
@@ -216,32 +152,32 @@ export default function App() {
     }
   }
 
-  function applyAuth(data) {
-    const nextAccess = data.access_token || "";
-    const nextRefresh = data.refresh_token || "";
+  function saveLocalCart(next) {
+    setLocalCart(next);
+    writeLocalJSON(LOCAL_CART_KEY, next);
+  }
 
-    setAccessToken(nextAccess);
-    setRefreshToken(nextRefresh);
-    setCurrentUser(data.user || null);
+  function applyAuth(payload) {
+    setAccessToken(payload.access_token || "");
+    setRefreshToken(payload.refresh_token || "");
+    setCurrentUser(payload.user || null);
 
-    writeToken("access_token", nextAccess);
-    writeToken("refresh_token", nextRefresh);
+    writeToken(ACCESS_KEY, payload.access_token || "");
+    writeToken(REFRESH_KEY, payload.refresh_token || "");
   }
 
   function logout() {
     setAccessToken("");
     setRefreshToken("");
     setCurrentUser(null);
-    setProducts([]);
-    setUsers([]);
-    setSelectedProduct(null);
-    setSelectedUser(null);
+    setCart({ items: [], total: 0 });
+    setOrders([]);
+    setAdminOrders([]);
 
-    clearToken("access_token");
-    clearToken("refresh_token");
-
-    setScreen("home");
-    setStatus("Вы вышли из аккаунта");
+    clearToken(ACCESS_KEY);
+    clearToken(REFRESH_KEY);
+    setScreen("catalog");
+    setStatus("Выход выполнен");
   }
 
   async function registerAndLogin() {
@@ -249,53 +185,57 @@ export default function App() {
       await callApi("/auth/register", {
         method: "POST",
         body: JSON.stringify({
-          email: registerForm.email,
-          password: registerForm.password,
-          gender: registerForm.gender,
-          age: Number(registerForm.age),
+          email: authForm.email,
+          password: authForm.password,
+          gender: authForm.gender,
+          age: Number(authForm.age || 0),
         }),
       });
 
-      const authData = await callApi("/auth/login", {
+      const auth = await callApi("/auth/login", {
         method: "POST",
         body: JSON.stringify({
-          email: registerForm.email,
-          password: registerForm.password,
+          email: authForm.email,
+          password: authForm.password,
         }),
       });
 
-      applyAuth(authData);
-      setScreen("products");
-      setStatus("Вы успешно зарегистрировались и вошли в систему");
+      applyAuth(auth);
+      setScreen("catalog");
+      setStatus("Регистрация завершена, вы вошли в аккаунт");
     });
   }
 
   async function login() {
     return runAction("Вход", async () => {
-      const authData = await callApi("/auth/login", {
+      const auth = await callApi("/auth/login", {
         method: "POST",
-        body: JSON.stringify(loginForm),
+        body: JSON.stringify({ email: authForm.email, password: authForm.password }),
       });
 
-      applyAuth(authData);
-      setScreen("products");
-      setStatus("Добро пожаловать");
+      applyAuth(auth);
+      setScreen("catalog");
+      setStatus("Вход выполнен");
     });
   }
 
   async function refreshSession() {
-    return runAction("Обновление сессии", async () => {
-      const data = await callApi("/auth/refresh", {
+    if (!refreshToken) return;
+
+    return runAction("Обновление токена", async () => {
+      const auth = await callApi("/auth/refresh", {
         method: "POST",
         body: JSON.stringify({ refresh_token: refreshToken }),
       });
 
-      applyAuth(data);
+      applyAuth(auth);
       setStatus("Сессия обновлена");
     });
   }
 
-  async function loadMe() {
+  async function loadProfile() {
+    if (!isAuth) return;
+
     return runAction("Профиль", async () => {
       const data = await callApi("/auth/me", { headers: authHeaders() });
       setCurrentUser(data);
@@ -305,174 +245,461 @@ export default function App() {
 
   async function loadProducts() {
     return runAction("Каталог", async () => {
-      const data = await callApi("/products", { headers: authHeaders() });
+      const params = new URLSearchParams();
+      if (filters.search.trim()) params.set("search", filters.search.trim());
+      if (filters.category.trim()) params.set("category", filters.category.trim());
+      if (filters.minPrice.trim()) params.set("min_price", filters.minPrice.trim());
+      if (filters.maxPrice.trim()) params.set("max_price", filters.maxPrice.trim());
+      if (filters.inStock) params.set("in_stock", "true");
+
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      const data = await callApi(`/products${suffix}`);
       setProducts(Array.isArray(data) ? data : []);
       setStatus("Каталог загружен");
     });
   }
 
-  async function getProductByID() {
-    return runAction("Поиск продукта", async () => {
-      const id = Number(productGetID);
-      if (!id) {
-        throw new Error("Введите корректный ID продукта");
-      }
+  async function syncCartWithServer(lines = localCart) {
+    if (!isAuth) return;
 
-      const data = await callApi(`/products/${id}`, { headers: authHeaders() });
-      setSelectedProduct(data);
-      setStatus(`Продукт #${id} найден`);
+    const payload = { items: lines.map((line) => ({ product_id: line.product_id, quantity: line.quantity })) };
+
+    const serverCart = await callApi("/cart", {
+      method: "PUT",
+      headers: authHeaders(),
+      body: JSON.stringify(payload),
+    });
+
+    setCart(serverCart);
+    const normalized = (serverCart.items || []).map((line) => ({
+      product_id: line.product.id,
+      quantity: line.quantity,
+    }));
+    saveLocalCart(normalized);
+  }
+
+  async function loadCart() {
+    if (!isAuth) {
+      const computedTotal = localCart.reduce((sum, line) => {
+        const product = products.find((item) => item.id === line.product_id);
+        return sum + Number(product?.price || 0) * line.quantity;
+      }, 0);
+      setCart({ items: [], total: computedTotal });
+      return;
+    }
+
+    return runAction("Корзина", async () => {
+      const data = await callApi("/cart", { headers: authHeaders() });
+      setCart(data);
+      const normalized = (data.items || []).map((line) => ({
+        product_id: line.product.id,
+        quantity: line.quantity,
+      }));
+      saveLocalCart(normalized);
+      setStatus("Корзина обновлена");
+    });
+  }
+
+  async function addToCart(productID) {
+    const found = localCart.find((line) => line.product_id === productID);
+    const next = found
+      ? localCart.map((line) => (line.product_id === productID ? { ...line, quantity: line.quantity + 1 } : line))
+      : [...localCart, { product_id: productID, quantity: 1 }];
+
+    saveLocalCart(next);
+
+    return runAction("Корзина", async () => {
+      await syncCartWithServer(next);
+      setStatus("Товар добавлен в корзину");
+    });
+  }
+
+  async function changeLocalQuantity(productID, quantity) {
+    const parsed = Number(quantity);
+    const next = localCart
+      .map((line) => (line.product_id === productID ? { ...line, quantity: parsed } : line))
+      .filter((line) => line.quantity > 0);
+
+    saveLocalCart(next);
+
+    return runAction("Синхронизация корзины", async () => {
+      await syncCartWithServer(next);
+      setStatus("Корзина синхронизирована");
+    });
+  }
+
+  async function checkout() {
+    if (!isAuth) {
+      setStatus("Ошибка: для оформления заказа нужна авторизация");
+      return;
+    }
+
+    return runAction("Оформление заказа", async () => {
+      const data = await callApi("/orders/checkout", {
+        method: "POST",
+        headers: authHeaders(),
+      });
+
+      saveLocalCart([]);
+      await Promise.all([loadProductsSilent(), loadOrdersSilent(), loadCartSilent()]);
+
+      if (data.stripe_client_secret) {
+        setStatus(`Заказ #${data.order_id} создан. Stripe client_secret получен.`);
+      } else {
+        setStatus(`Заказ #${data.order_id} создан.`);
+      }
+    });
+  }
+
+  async function loadOrders() {
+    if (!isAuth) return;
+
+    return runAction("История заказов", async () => {
+      const data = await callApi("/orders", { headers: authHeaders() });
+      setOrders(Array.isArray(data) ? data : []);
+      setStatus("История заказов загружена");
+    });
+  }
+
+  async function loadAdminOrders() {
+    if (!isAdmin) return;
+
+    return runAction("Заказы всех пользователей", async () => {
+      const data = await callApi("/admin/orders", { headers: authHeaders() });
+      setAdminOrders(Array.isArray(data) ? data : []);
+      setStatus("Список заказов для админа обновлен");
     });
   }
 
   async function createProduct() {
-    return runAction("Создание продукта", async () => {
-      const data = await callApi("/products", {
+    if (!isAdmin) return;
+
+    return runAction("Создание товара", async () => {
+      await callApi("/products", {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({
-          name: createProductForm.name,
-          description: createProductForm.description,
-          price: Number(createProductForm.price),
-          stock: Number(createProductForm.stock),
+          name: adminCreate.name,
+          category: adminCreate.category,
+          description: adminCreate.description,
+          price: Number(adminCreate.price || 0),
+          stock: Number(adminCreate.stock || 0),
         }),
       });
 
-      setProducts((prev) => [data, ...prev]);
-      setStatus("Продукт добавлен");
+      setAdminCreate(emptyAdminCreate);
+      await loadProductsSilent();
+      setStatus("Товар создан");
     });
   }
 
   async function updateProduct() {
-    return runAction("Обновление продукта", async () => {
-      const id = Number(updateProductForm.id);
-      if (!id) {
-        throw new Error("Введите ID продукта для изменения");
-      }
+    if (!isAdmin) return;
 
-      const payload = buildUpdatePayload(updateProductForm, ["price", "stock"]);
-      if (Object.keys(payload).length === 0) {
-        throw new Error("Заполните хотя бы одно поле для обновления");
-      }
+    return runAction("Обновление товара", async () => {
+      const id = Number(adminUpdate.id);
+      if (!id) throw new Error("укажите ID товара");
 
-      const data = await callApi(`/products/${id}`, {
-        method: "PUT",
-        headers: authHeaders(),
-        body: JSON.stringify(payload),
-      });
+      const payload = {};
+      if (adminUpdate.name.trim()) payload.name = adminUpdate.name.trim();
+      if (adminUpdate.category.trim()) payload.category = adminUpdate.category.trim();
+      if (adminUpdate.description.trim()) payload.description = adminUpdate.description.trim();
+      if (adminUpdate.price !== "") payload.price = Number(adminUpdate.price);
+      if (adminUpdate.stock !== "") payload.stock = Number(adminUpdate.stock);
 
-      setSelectedProduct(data);
-      setProducts((prev) => prev.map((item) => (item.id === data.id ? data : item)));
-      setStatus(`Продукт #${id} обновлен`);
-    });
-  }
-
-  async function deleteProduct() {
-    return runAction("Удаление продукта", async () => {
-      const id = Number(productDeleteID);
-      if (!id) {
-        throw new Error("Введите ID продукта для удаления");
-      }
+      if (Object.keys(payload).length === 0) throw new Error("нет полей для обновления");
 
       await callApi(`/products/${id}`, {
-        method: "DELETE",
-        headers: authHeaders(),
-      });
-
-      setProducts((prev) => prev.filter((item) => item.id !== id));
-      setSelectedProduct(null);
-      setStatus(`Продукт #${id} удален`);
-    });
-  }
-
-  async function loadUsers() {
-    return runAction("Список пользователей", async () => {
-      const data = await callApi("/users", { headers: authHeaders() });
-      setUsers(Array.isArray(data) ? data : []);
-      setStatus("Список пользователей обновлен");
-    });
-  }
-
-  async function getUserByID() {
-    return runAction("Поиск пользователя", async () => {
-      const id = Number(userGetID);
-      if (!id) {
-        throw new Error("Введите корректный ID пользователя");
-      }
-
-      const data = await callApi(`/users/${id}`, { headers: authHeaders() });
-      setSelectedUser(data);
-      setStatus(`Пользователь #${id} найден`);
-    });
-  }
-
-  async function updateUser() {
-    return runAction("Обновление пользователя", async () => {
-      const id = Number(updateUserForm.id);
-      if (!id) {
-        throw new Error("Введите ID пользователя для изменения");
-      }
-
-      const payload = buildUpdatePayload(updateUserForm, ["age"]);
-      if (Object.keys(payload).length === 0) {
-        throw new Error("Укажите хотя бы одно поле для обновления пользователя");
-      }
-
-      const data = await callApi(`/users/${id}`, {
         method: "PUT",
         headers: authHeaders(),
         body: JSON.stringify(payload),
       });
 
-      setSelectedUser(data);
-      setUsers((prev) => prev.map((item) => (item.id === data.id ? data : item)));
-      setStatus(`Пользователь #${id} обновлен`);
+      await loadProductsSilent();
+      setStatus(`Товар #${id} обновлен`);
     });
   }
 
-  async function blockUser() {
-    return runAction("Блокировка", async () => {
-      const id = Number(userBlockID);
-      if (!id) {
-        throw new Error("Введите ID пользователя для блокировки");
-      }
+  async function removeProduct() {
+    if (!isAdmin) return;
 
-      await callApi(`/users/${id}`, {
-        method: "DELETE",
-        headers: authHeaders(),
-      });
+    return runAction("Удаление товара", async () => {
+      const id = Number(deleteProductID);
+      if (!id) throw new Error("укажите ID товара");
 
-      setStatus(`Пользователь #${id} заблокирован`);
+      await callApi(`/products/${id}`, { method: "DELETE", headers: authHeaders() });
+      setDeleteProductID("");
+      await loadProductsSilent();
+      setStatus(`Товар #${id} удален`);
     });
+  }
+
+  async function loadProductsSilent() {
+    const params = new URLSearchParams();
+    if (filters.search.trim()) params.set("search", filters.search.trim());
+    if (filters.category.trim()) params.set("category", filters.category.trim());
+    if (filters.minPrice.trim()) params.set("min_price", filters.minPrice.trim());
+    if (filters.maxPrice.trim()) params.set("max_price", filters.maxPrice.trim());
+    if (filters.inStock) params.set("in_stock", "true");
+
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    const data = await callApi(`/products${suffix}`);
+    setProducts(Array.isArray(data) ? data : []);
+  }
+
+  async function loadOrdersSilent() {
+    if (!isAuth) return;
+    const data = await callApi("/orders", { headers: authHeaders() });
+    setOrders(Array.isArray(data) ? data : []);
+  }
+
+  async function loadCartSilent() {
+    if (!isAuth) return;
+    const data = await callApi("/cart", { headers: authHeaders() });
+    setCart(data);
   }
 
   useEffect(() => {
-    if (!accessToken) return;
+    loadProducts();
+  }, []);
 
-    loadMe();
+  useEffect(() => {
+    if (!isAuth) return;
+
+    loadProfile();
+    syncCartWithServer(localCart);
+    loadOrders();
   }, [accessToken]);
 
-  function renderHome() {
+  const cartItemsForGuest = localCart.map((line) => {
+    const product = products.find((item) => item.id === line.product_id);
+    return {
+    productID: line.product_id,
+      product,
+      quantity: line.quantity,
+      price: Number(product?.price || 0),
+      lineTotal: Number(product?.price || 0) * line.quantity,
+    };
+  });
+
+  const guestTotal = cartItemsForGuest.reduce((sum, line) => sum + line.lineTotal, 0);
+
+  function renderCatalog() {
     return (
-      <section className="panel hero">
-        <div>
-          <p className="eyebrow">Интернет-магазин</p>
-          <h1>Покупайте и управляйте товарами в одном месте</h1>
-          <p className="lead">
-            Добро пожаловать в магазин. Войдите в аккаунт, чтобы работать с каталогом и управлять товарами по своей роли.
-          </p>
-          <div className="actions">
-            <button onClick={() => setScreen("products")} disabled={!isAuthenticated}>Перейти в каталог</button>
-            <button className="ghost" onClick={() => setScreen("auth")}>{isAuthenticated ? "Сменить аккаунт" : "Войти или зарегистрироваться"}</button>
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h2>Каталог товаров</h2>
+            <p>Фильтрация и поиск по названию, категории и цене.</p>
           </div>
+          <button disabled={busy} onClick={loadProducts}>Обновить</button>
         </div>
 
-        <div className="hero-info">
-          <h3>Ваш профиль</h3>
-          <p><strong>Пользователь:</strong> {currentUser?.email || "гость"}</p>
-          <p><strong>Ваша роль:</strong> <UserBadge role={role} /></p>
-          <p><strong>Права:</strong> {role === "seller" ? "создание и редактирование товаров" : role === "admin" ? "админ-панель и удаление товаров" : role === "user" ? "просмотр каталога" : "ограниченный доступ"}</p>
-          <p><strong>Статус:</strong> {status}</p>
-          {isAuthenticated ? <button className="ghost" disabled={busy} onClick={loadMe}>Обновить роль и профиль</button> : null}
+        <div className="filters">
+          <input placeholder="Поиск" value={filters.search} onChange={(e) => setFilters({ ...filters, search: e.target.value })} />
+          <input placeholder="Категория" value={filters.category} onChange={(e) => setFilters({ ...filters, category: e.target.value })} />
+          <input type="number" placeholder="Мин. цена" value={filters.minPrice} onChange={(e) => setFilters({ ...filters, minPrice: e.target.value })} />
+          <input type="number" placeholder="Макс. цена" value={filters.maxPrice} onChange={(e) => setFilters({ ...filters, maxPrice: e.target.value })} />
+          <label className="stock-toggle">
+            <input type="checkbox" checked={filters.inStock} onChange={(e) => setFilters({ ...filters, inStock: e.target.checked })} />
+            Только в наличии
+          </label>
+          <button disabled={busy} onClick={loadProducts}>Применить</button>
+        </div>
+
+        <div className="grid products">
+          {products.length === 0 ? <div className="empty">По фильтрам ничего не найдено.</div> : null}
+          {products.map((product) => (
+            <article className="card product" key={product.id}>
+              <div className="row between">
+                <h3>{product.name}</h3>
+                <span className="pill">#{product.id}</span>
+              </div>
+              <p className="muted">{product.description}</p>
+              <div className="row tags">
+                <span className="pill light">{product.category}</span>
+                <span className="pill light">Склад: {product.stock}</span>
+              </div>
+              <div className="row between">
+                <strong>{toCurrency(product.price)}</strong>
+                <button disabled={busy || product.stock <= 0} onClick={() => addToCart(product.id)}>В корзину</button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
+  function renderCart() {
+    const serverItems = isAuth ? cart.items || [] : [];
+
+    return (
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h2>Корзина</h2>
+            <p>localStorage + синхронизация с сервером после авторизации.</p>
+          </div>
+          {isAuth ? <button disabled={busy} onClick={loadCart}>Обновить корзину</button> : null}
+        </div>
+
+        {isAuth ? (
+          <div className="stack">
+            {serverItems.length === 0 ? <div className="empty">Корзина пуста.</div> : null}
+            {serverItems.map((line) => (
+              <div className="line" key={`${line.product.id}_${line.id}`}>
+                <div>
+                  <strong>{line.product.name}</strong>
+                  <p className="muted">{toCurrency(line.price)} x {line.quantity}</p>
+                </div>
+                <div className="row">
+                  <input
+                    type="number"
+                    min="1"
+                    value={line.quantity}
+                    onChange={(e) => changeLocalQuantity(line.product.id, e.target.value)}
+                  />
+                  <span className="pill">{toCurrency(line.price * line.quantity)}</span>
+                </div>
+              </div>
+            ))}
+            <div className="row between total">
+              <strong>Итого:</strong>
+              <strong>{toCurrency(cart.total)}</strong>
+            </div>
+            <button disabled={busy || serverItems.length === 0} onClick={checkout}>Оформить заказ (Stripe)</button>
+          </div>
+        ) : (
+          <div className="stack">
+            {cartItemsForGuest.length === 0 ? <div className="empty">Локальная корзина пуста.</div> : null}
+            {cartItemsForGuest.map((line) => (
+              <div className="line" key={line.productID}>
+                <div>
+                <strong>{line.product?.name || `Товар #${line.productID}`}</strong>
+                  <p className="muted">{toCurrency(line.price)} x {line.quantity}</p>
+                </div>
+                <span className="pill">{toCurrency(line.lineTotal)}</span>
+              </div>
+            ))}
+            <div className="row between total">
+              <strong>Итого:</strong>
+              <strong>{toCurrency(guestTotal)}</strong>
+            </div>
+            <p className="muted">Войдите в аккаунт, чтобы синхронизировать корзину с сервером и оформить заказ.</p>
+          </div>
+        )}
+      </section>
+    );
+  }
+
+  function renderOrders() {
+    if (!isAuth) {
+      return (
+        <section className="panel">
+          <h2>История заказов</h2>
+          <p>Раздел доступен только после авторизации.</p>
+        </section>
+      );
+    }
+
+    return (
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h2>История заказов</h2>
+            <p>Ваши оформленные заказы.</p>
+          </div>
+          <button disabled={busy} onClick={loadOrders}>Обновить</button>
+        </div>
+
+        <div className="stack">
+          {orders.length === 0 ? <div className="empty">Заказов пока нет.</div> : null}
+          {orders.map((order) => (
+            <article className="card" key={order.id}>
+              <div className="row between">
+                <h3>Заказ #{order.id}</h3>
+                <span className="pill">{order.status}</span>
+              </div>
+              <p className="muted">Создан: {toDate(order.created_at)}</p>
+              <p className="muted">Оплата: {order.payment_provider}, ref: {order.payment_ref || "-"}</p>
+              <div className="stack mini">
+                {(order.items || []).map((item, idx) => (
+                  <div className="line compact" key={`${order.id}_${idx}`}>
+                    <span>{item.product_name} x {item.quantity}</span>
+                    <strong>{toCurrency(item.line_total)}</strong>
+                  </div>
+                ))}
+              </div>
+              <div className="row between total">
+                <strong>Итог:</strong>
+                <strong>{toCurrency(order.total_amount)}</strong>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
+  function renderAdmin() {
+    if (!isAdmin) {
+      return (
+        <section className="panel">
+          <h2>Панель администратора</h2>
+          <p>Доступ только для роли admin.</p>
+        </section>
+      );
+    }
+
+    return (
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h2>Панель администратора</h2>
+            <p>Управление товарами и просмотр всех заказов.</p>
+          </div>
+          <button disabled={busy} onClick={loadAdminOrders}>Загрузить все заказы</button>
+        </div>
+
+        <div className="admin-grid">
+          <article className="card">
+            <h3>Создать товар</h3>
+            <input placeholder="Название" value={adminCreate.name} onChange={(e) => setAdminCreate({ ...adminCreate, name: e.target.value })} />
+            <input placeholder="Категория" value={adminCreate.category} onChange={(e) => setAdminCreate({ ...adminCreate, category: e.target.value })} />
+            <input placeholder="Описание" value={adminCreate.description} onChange={(e) => setAdminCreate({ ...adminCreate, description: e.target.value })} />
+            <input type="number" placeholder="Цена" value={adminCreate.price} onChange={(e) => setAdminCreate({ ...adminCreate, price: e.target.value })} />
+            <input type="number" placeholder="Остаток" value={adminCreate.stock} onChange={(e) => setAdminCreate({ ...adminCreate, stock: e.target.value })} />
+            <button disabled={busy} onClick={createProduct}>Создать</button>
+          </article>
+
+          <article className="card">
+            <h3>Обновить товар</h3>
+            <input placeholder="ID" value={adminUpdate.id} onChange={(e) => setAdminUpdate({ ...adminUpdate, id: e.target.value })} />
+            <input placeholder="Название" value={adminUpdate.name} onChange={(e) => setAdminUpdate({ ...adminUpdate, name: e.target.value })} />
+            <input placeholder="Категория" value={adminUpdate.category} onChange={(e) => setAdminUpdate({ ...adminUpdate, category: e.target.value })} />
+            <input placeholder="Описание" value={adminUpdate.description} onChange={(e) => setAdminUpdate({ ...adminUpdate, description: e.target.value })} />
+            <input type="number" placeholder="Цена" value={adminUpdate.price} onChange={(e) => setAdminUpdate({ ...adminUpdate, price: e.target.value })} />
+            <input type="number" placeholder="Остаток" value={adminUpdate.stock} onChange={(e) => setAdminUpdate({ ...adminUpdate, stock: e.target.value })} />
+            <button disabled={busy} onClick={updateProduct}>Обновить</button>
+          </article>
+
+          <article className="card">
+            <h3>Удалить товар</h3>
+            <input placeholder="ID" value={deleteProductID} onChange={(e) => setDeleteProductID(e.target.value)} />
+            <button className="danger" disabled={busy} onClick={removeProduct}>Удалить</button>
+          </article>
+        </div>
+
+        <div className="stack top-gap">
+          <h3>Заказы всех пользователей</h3>
+          {adminOrders.length === 0 ? <div className="empty">Список пуст.</div> : null}
+          {adminOrders.map((order) => (
+            <div className="line" key={`admin_${order.id}`}>
+              <span>#{order.id} / {order.status} / {toDate(order.created_at)}</span>
+              <strong>{toCurrency(order.total_amount)}</strong>
+            </div>
+          ))}
         </div>
       </section>
     );
@@ -481,298 +708,75 @@ export default function App() {
   function renderAuth() {
     return (
       <section className="panel">
-        <h2>Аккаунт</h2>
-        <p className="muted">После регистрации вход выполняется автоматически.</p>
+        <h2>{isAuth ? "Профиль" : "Авторизация"}</h2>
+        <div className="auth-grid">
+          <article className="card">
+            <h3>Регистрация + вход</h3>
+            <input placeholder="Email" value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} />
+            <input type="password" placeholder="Пароль" value={authForm.password} onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })} />
+            <input placeholder="Пол" value={authForm.gender} onChange={(e) => setAuthForm({ ...authForm, gender: e.target.value })} />
+            <input type="number" placeholder="Возраст" value={authForm.age} onChange={(e) => setAuthForm({ ...authForm, age: e.target.value })} />
+            <button disabled={busy} onClick={registerAndLogin}>Зарегистрироваться</button>
+          </article>
 
-        <div className="two-columns">
-          <div className="card">
-            <h3>Регистрация</h3>
-            <label>
-              Email
-              <input value={registerForm.email} onChange={(e) => setRegisterForm({ ...registerForm, email: e.target.value })} />
-            </label>
-            <label>
-              Password
-              <input type="password" value={registerForm.password} onChange={(e) => setRegisterForm({ ...registerForm, password: e.target.value })} />
-            </label>
-            <label>
-              Gender
-              <input value={registerForm.gender} onChange={(e) => setRegisterForm({ ...registerForm, gender: e.target.value })} />
-            </label>
-            <label>
-              Age
-              <input type="number" value={registerForm.age} onChange={(e) => setRegisterForm({ ...registerForm, age: e.target.value })} />
-            </label>
-            <button disabled={busy} onClick={registerAndLogin}>Создать аккаунт</button>
-          </div>
-
-          <div className="card">
+          <article className="card">
             <h3>Вход</h3>
-            <label>
-              Email
-              <input value={loginForm.email} onChange={(e) => setLoginForm({ ...loginForm, email: e.target.value })} />
-            </label>
-            <label>
-              Password
-              <input type="password" value={loginForm.password} onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })} />
-            </label>
-            <div className="actions compact">
-              <button disabled={busy} onClick={login}>Войти</button>
-              <button className="ghost" disabled={busy || !refreshToken} onClick={refreshSession}>Обновить сессию</button>
-            </div>
-            {isAuthenticated ? (
-              <div className="actions compact">
-                <button className="ghost" disabled={busy} onClick={loadMe}>Обновить профиль</button>
-                <button className="ghost" disabled={busy} onClick={logout}>Выйти</button>
-              </div>
-            ) : null}
-          </div>
+            <input placeholder="Email" value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} />
+            <input type="password" placeholder="Пароль" value={authForm.password} onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })} />
+            <button disabled={busy} onClick={login}>Войти</button>
+            <button className="ghost" disabled={busy || !refreshToken} onClick={refreshSession}>Обновить токен</button>
+            {isAuth ? <button className="ghost" disabled={busy} onClick={loadProfile}>Обновить профиль</button> : null}
+            {isAuth ? <button className="danger" disabled={busy} onClick={logout}>Выйти</button> : null}
+          </article>
+
+          <article className="card">
+            <h3>Текущий профиль</h3>
+            <p><strong>Email:</strong> {currentUser?.email || "-"}</p>
+            <p><strong>Роль:</strong> {roleTitle(role)}</p>
+            <p><strong>ID:</strong> {currentUser?.id || "-"}</p>
+            <p><strong>Возраст:</strong> {currentUser?.age || "-"}</p>
+          </article>
         </div>
       </section>
     );
   }
 
-  function renderProducts() {
-    if (!isAuthenticated) {
-      return (
-        <section className="panel">
-          <h2>Каталог товаров</h2>
-          <p className="muted">Для доступа к каталогу нужно войти в аккаунт.</p>
-          <button onClick={() => setScreen("auth")}>Перейти ко входу</button>
-        </section>
-      );
-    }
-
-    return (
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <h2>Каталог товаров</h2>
-            <p className="muted">Просматривайте товары и управляйте ими согласно своей роли.</p>
-          </div>
-          <button disabled={busy} onClick={loadProducts}>Обновить каталог</button>
-        </div>
-
-        <div className="selected-card top-gap">
-          <p><strong>Текущая роль:</strong> <UserBadge role={role} /></p>
-          <p>
-            {isSeller
-              ? "Вы можете создавать и редактировать товары."
-              : isAdmin
-                ? "Вы можете удалять товары и управлять пользователями."
-                : "Для создания и редактирования товаров нужна роль seller."}
-          </p>
-        </div>
-
-        <div className="two-columns">
-          <div className="card">
-            <h3>Поиск товара</h3>
-            <label>
-              ID товара
-              <input value={productGetID} onChange={(e) => setProductGetID(e.target.value)} />
-            </label>
-            <div className="actions compact">
-              <button disabled={busy} onClick={getProductByID}>Найти товар</button>
-              <button className="ghost" disabled={busy || !isAdmin} onClick={deleteProduct}>Удалить (admin)</button>
-            </div>
-            <label className="top-gap">
-              ID для удаления
-              <input value={productDeleteID} onChange={(e) => setProductDeleteID(e.target.value)} />
-            </label>
-
-            {selectedProduct ? (
-              <div className="selected-card top-gap">
-                <h4>Найденный товар</h4>
-                <p><strong>{selectedProduct.name}</strong></p>
-                <p>{selectedProduct.description}</p>
-                <p>Цена: {selectedProduct.price}, Остаток: {selectedProduct.stock}</p>
-              </div>
-            ) : null}
-          </div>
-
-          <div className="card">
-            <h3>Создание товара</h3>
-            <label>
-              Название
-              <input value={createProductForm.name} onChange={(e) => setCreateProductForm({ ...createProductForm, name: e.target.value })} />
-            </label>
-            <label>
-              Описание
-              <input value={createProductForm.description} onChange={(e) => setCreateProductForm({ ...createProductForm, description: e.target.value })} />
-            </label>
-            <label>
-              Цена
-              <input type="number" step="0.01" value={createProductForm.price} onChange={(e) => setCreateProductForm({ ...createProductForm, price: e.target.value })} />
-            </label>
-            <label>
-              Количество
-              <input type="number" value={createProductForm.stock} onChange={(e) => setCreateProductForm({ ...createProductForm, stock: e.target.value })} />
-            </label>
-            <button disabled={busy || !canCreateOrUpdateProduct} onClick={createProduct}>Добавить товар (seller)</button>
-          </div>
-        </div>
-
-        <div className="card top-gap">
-          <h3>Редактирование товара</h3>
-          <div className="grid">
-            <label>
-              ID товара
-              <input value={updateProductForm.id} onChange={(e) => setUpdateProductForm({ ...updateProductForm, id: e.target.value })} />
-            </label>
-            <label>
-              Название
-              <input value={updateProductForm.name} onChange={(e) => setUpdateProductForm({ ...updateProductForm, name: e.target.value })} />
-            </label>
-            <label>
-              Описание
-              <input value={updateProductForm.description} onChange={(e) => setUpdateProductForm({ ...updateProductForm, description: e.target.value })} />
-            </label>
-            <label>
-              Цена
-              <input value={updateProductForm.price} onChange={(e) => setUpdateProductForm({ ...updateProductForm, price: e.target.value })} />
-            </label>
-            <label>
-              Количество
-              <input value={updateProductForm.stock} onChange={(e) => setUpdateProductForm({ ...updateProductForm, stock: e.target.value })} />
-            </label>
-          </div>
-          <button disabled={busy || !canCreateOrUpdateProduct} onClick={updateProduct}>Сохранить изменения (seller)</button>
-        </div>
-
-        <div className="cards-grid top-gap">
-          {products.length === 0 ? <div className="empty">Пока нет загруженных товаров.</div> : products.map((product) => <ProductCard key={product.id} product={product} />)}
-        </div>
-      </section>
-    );
-  }
-
-  function renderAdmin() {
-    if (!isAuthenticated) {
-      return (
-        <section className="panel">
-          <h2>Админ-панель</h2>
-          <p className="muted">Сначала войдите в аккаунт.</p>
-        </section>
-      );
-    }
-
-    if (!isAdmin) {
-      return (
-        <section className="panel">
-          <h2>Админ-панель</h2>
-          <p className="muted">Этот раздел доступен только для роли admin.</p>
-        </section>
-      );
-    }
-
-    return (
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <h2>Админ-панель</h2>
-            <p className="muted">Управление пользователями: просмотр, изменение и блокировка.</p>
-          </div>
-          <button disabled={busy} onClick={loadUsers}>Обновить список</button>
-        </div>
-
-        <div className="two-columns">
-          <div className="card">
-            <h3>Поиск и блокировка</h3>
-            <label>
-              ID пользователя
-              <input value={userGetID} onChange={(e) => setUserGetID(e.target.value)} />
-            </label>
-            <div className="actions compact">
-              <button disabled={busy} onClick={getUserByID}>Найти пользователя</button>
-            </div>
-            <label className="top-gap">
-              ID для блокировки
-              <input value={userBlockID} onChange={(e) => setUserBlockID(e.target.value)} />
-            </label>
-            <button className="ghost" disabled={busy} onClick={blockUser}>Заблокировать</button>
-
-            {selectedUser ? (
-              <div className="selected-card top-gap">
-                <h4>Профиль пользователя</h4>
-                <p><strong>{selectedUser.email}</strong></p>
-                <p>Роль: {selectedUser.role}</p>
-                <p>Возраст: {selectedUser.age}, Пол: {selectedUser.gender || "-"}</p>
-              </div>
-            ) : null}
-          </div>
-
-          <div className="card">
-            <h3>Редактирование пользователя</h3>
-            <label>
-              ID
-              <input value={updateUserForm.id} onChange={(e) => setUpdateUserForm({ ...updateUserForm, id: e.target.value })} />
-            </label>
-            <label>
-              Email
-              <input value={updateUserForm.email} onChange={(e) => setUpdateUserForm({ ...updateUserForm, email: e.target.value })} />
-            </label>
-            <label>
-              Возраст
-              <input value={updateUserForm.age} onChange={(e) => setUpdateUserForm({ ...updateUserForm, age: e.target.value })} />
-            </label>
-            <label>
-              Пол
-              <input value={updateUserForm.gender} onChange={(e) => setUpdateUserForm({ ...updateUserForm, gender: e.target.value })} />
-            </label>
-            <label>
-              Роль (user/seller/admin)
-              <input value={updateUserForm.role} onChange={(e) => setUpdateUserForm({ ...updateUserForm, role: e.target.value })} />
-            </label>
-            <button disabled={busy} onClick={updateUser}>Сохранить пользователя</button>
-          </div>
-        </div>
-
-        <div className="cards-grid top-gap">
-          {users.length === 0 ? <div className="empty">Список пользователей пуст.</div> : users.map((user) => <UserCard key={user.id} user={user} />)}
-        </div>
-      </section>
-    );
-  }
-
-  function renderScreen() {
-    if (screen === "auth") return renderAuth();
-    if (screen === "products") return renderProducts();
+  function renderContent() {
+    if (screen === "cart") return renderCart();
+    if (screen === "orders") return renderOrders();
     if (screen === "admin") return renderAdmin();
-    return renderHome();
+    if (screen === "auth") return renderAuth();
+    return renderCatalog();
   }
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand-block">
-          <span className="brand">somewebproject</span>
-          <span>Роль:</span>
-          <UserBadge role={role} />
+    <main className="app">
+      <header className="header">
+        <div>
+          <p className="kicker">E-Commerce Playground</p>
+          <h1>Shop Console</h1>
         </div>
 
-        <nav className="nav">
-          {navItems.map((item) => (
+        <div className="row top-links">
+          {nav.map((item) => (
             <button
               key={item.key}
-              className={`nav-btn ${screen === item.key ? "active" : ""}`}
+              className={screen === item.key ? "active" : "ghost"}
               disabled={!item.enabled || busy}
               onClick={() => setScreen(item.key)}
             >
               {item.label}
             </button>
           ))}
-        </nav>
-
-        <div className="top-actions">
-          <button className="ghost" disabled={!isAuthenticated || busy} onClick={loadMe}>Обновить профиль</button>
-          <button className="ghost" disabled={!isAuthenticated || busy || !refreshToken} onClick={refreshSession}>Refresh</button>
-          {isAuthenticated ? <button className="danger" disabled={busy} onClick={logout}>Выйти</button> : null}
         </div>
       </header>
 
-      <div className={`notice ${status.startsWith("Ошибка") ? "error" : "ok"}`}>{status}</div>
+      <section className={`notice ${status.startsWith("Ошибка") ? "error" : "ok"}`}>
+        <span>{status}</span>
+        <span>Роль: {roleTitle(role)}</span>
+      </section>
 
-      {renderScreen()}
+      {renderContent()}
     </main>
   );
 }

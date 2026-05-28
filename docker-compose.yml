@@ -45,6 +45,8 @@ services:
       DB_SSLMODE: disable
       JWT_SECRET: dev_secret
       REDIS_ADDR: redis:6379
+      STRIPE_SECRET_KEY: "sk_test_51TboabCTvs9FGjmjzbB4SPDE8Fa9WNlMV7yOsmoutWk25BtA4fMHef6N1q9IA7tVpRtjluO7xLhnAieL9xnx8pww00YE0Zcnse"
+      STRIPE_WEBHOOK_SECRET: "whsec_c5aa7413a3d30af357fccc0937e2d931fb3fcf77c55d3adf22a737583a335be7"
     ports:
       - "8080:8080"
 

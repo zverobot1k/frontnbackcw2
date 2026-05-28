@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -12,14 +13,39 @@ import (
 	"somewebproject/internal/models"
 	"somewebproject/internal/repository"
 
+	"github.com/stripe/stripe-go/v83"
+	"github.com/stripe/stripe-go/v83/paymentintent"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 const (
-	RoleUser   = "user"
-	RoleSeller = "seller"
-	RoleAdmin  = "admin"
+	RoleCustomer = "customer"
+	RoleAdmin    = "admin"
 )
+
+var allowedRoles = map[string]struct{}{
+	RoleCustomer: {},
+	RoleAdmin:    {},
+}
+
+type ProductListFilter struct {
+	Query       string
+	Category    string
+	MinPrice    *float64
+	MaxPrice    *float64
+	OnlyInStock bool
+}
+
+type CartLineInput struct {
+	ProductID uint
+	Quantity  int
+}
+
+type CheckoutResult struct {
+	Order        *models.Order
+	ClientSecret string
+}
 
 type AuthService interface {
 	Register(ctx context.Context, email, password, gender string, age int) (*models.User, error)
@@ -36,11 +62,23 @@ type UserService interface {
 }
 
 type ProductService interface {
-	Create(ctx context.Context, ownerID uint, name, description string, price float64, stock int) (*models.Product, error)
-	List(ctx context.Context) ([]models.Product, error)
+	Create(ctx context.Context, ownerID uint, name, category, description string, price float64, stock int) (*models.Product, error)
+	List(ctx context.Context, filter ProductListFilter) ([]models.Product, error)
 	GetByID(ctx context.Context, id uint) (*models.Product, error)
 	Update(ctx context.Context, id uint, updates map[string]any) (*models.Product, error)
 	Delete(ctx context.Context, id uint) error
+}
+
+type CartService interface {
+	GetByUserID(ctx context.Context, userID uint) ([]models.CartItem, error)
+	Sync(ctx context.Context, userID uint, lines []CartLineInput) ([]models.CartItem, error)
+}
+
+type OrderService interface {
+	Checkout(ctx context.Context, userID uint) (*CheckoutResult, error)
+	ListMyOrders(ctx context.Context, userID uint) ([]models.Order, error)
+	ListAllOrders(ctx context.Context) ([]models.Order, error)
+	MarkPaidByPaymentRef(ctx context.Context, paymentRef string) error
 }
 
 type authService struct {
@@ -56,8 +94,25 @@ type userService struct {
 }
 
 type productService struct {
-	repo  repository.ProductRepository
-	cache cache.Cache
+	repo      repository.ProductRepository
+	cartRepo  repository.CartRepository
+	orderRepo repository.OrderRepository
+	cache     cache.Cache
+	stripeKey string
+}
+
+type cartService struct {
+	productRepo repository.ProductRepository
+	cartRepo    repository.CartRepository
+	cache       cache.Cache
+}
+
+type orderService struct {
+	productRepo repository.ProductRepository
+	cartRepo    repository.CartRepository
+	orderRepo   repository.OrderRepository
+	cache       cache.Cache
+	stripeKey   string
 }
 
 func NewAuthService(users repository.UserRepository, secret string) AuthService {
@@ -73,8 +128,16 @@ func NewUserService(repo repository.UserRepository, c cache.Cache) UserService {
 	return &userService{repo: repo, cache: c}
 }
 
-func NewProductService(repo repository.ProductRepository, c cache.Cache) ProductService {
-	return &productService{repo: repo, cache: c}
+func NewProductService(repo repository.ProductRepository, cartRepo repository.CartRepository, orderRepo repository.OrderRepository, c cache.Cache, stripeKey string) ProductService {
+	return &productService{repo: repo, cartRepo: cartRepo, orderRepo: orderRepo, cache: c, stripeKey: stripeKey}
+}
+
+func NewCartService(productRepo repository.ProductRepository, cartRepo repository.CartRepository, c cache.Cache) CartService {
+	return &cartService{productRepo: productRepo, cartRepo: cartRepo, cache: c}
+}
+
+func NewOrderService(productRepo repository.ProductRepository, cartRepo repository.CartRepository, orderRepo repository.OrderRepository, c cache.Cache, stripeKey string) OrderService {
+	return &orderService{productRepo: productRepo, cartRepo: cartRepo, orderRepo: orderRepo, cache: c, stripeKey: stripeKey}
 }
 
 func (s *authService) Register(ctx context.Context, email, password, gender string, age int) (*models.User, error) {
@@ -94,9 +157,13 @@ func (s *authService) Register(ctx context.Context, email, password, gender stri
 	user := &models.User{
 		Email:    email,
 		Password: string(hash),
-		Role:     RoleUser,
+		Role:     RoleCustomer,
 		Age:      age,
 		Gender:   gender,
+	}
+
+	if users, err := s.users.List(ctx); err == nil && len(users) == 0 {
+		user.Role = RoleAdmin
 	}
 
 	if err := s.users.Create(ctx, user); err != nil {
@@ -205,6 +272,13 @@ func (s *userService) Update(ctx context.Context, id uint, updates map[string]an
 		return nil, errors.New("email cannot be empty")
 	}
 
+	if role, ok := updates["role"].(string); ok {
+		if _, found := allowedRoles[strings.TrimSpace(strings.ToLower(role))]; !found {
+			return nil, errors.New("role must be customer or admin")
+		}
+		updates["role"] = strings.TrimSpace(strings.ToLower(role))
+	}
+
 	user, err := s.repo.Update(ctx, id, updates)
 	if err != nil {
 		return nil, err
@@ -231,9 +305,9 @@ func (s *userService) Block(ctx context.Context, id uint) error {
 }
 
 // ProductService methods with caching
-func (s *productService) Create(ctx context.Context, ownerID uint, name, description string, price float64, stock int) (*models.Product, error) {
-	if strings.TrimSpace(name) == "" || strings.TrimSpace(description) == "" {
-		return nil, errors.New("name and description are required")
+func (s *productService) Create(ctx context.Context, ownerID uint, name, category, description string, price float64, stock int) (*models.Product, error) {
+	if strings.TrimSpace(name) == "" || strings.TrimSpace(description) == "" || strings.TrimSpace(category) == "" {
+		return nil, errors.New("name, category and description are required")
 	}
 	if price < 0 {
 		return nil, errors.New("price must be positive")
@@ -244,6 +318,7 @@ func (s *productService) Create(ctx context.Context, ownerID uint, name, descrip
 
 	product := &models.Product{
 		Name:        name,
+		Category:    strings.TrimSpace(strings.ToLower(category)),
 		Description: description,
 		Price:       price,
 		Stock:       stock,
@@ -254,12 +329,19 @@ func (s *productService) Create(ctx context.Context, ownerID uint, name, descrip
 		return nil, err
 	}
 
-	_ = s.cache.Delete(ctx, "products:list")
+	_ = s.cache.Clear(ctx, "products:list:*")
 	return product, nil
 }
 
-func (s *productService) List(ctx context.Context) ([]models.Product, error) {
-	const cacheKey = "products:list"
+func (s *productService) List(ctx context.Context, filter ProductListFilter) ([]models.Product, error) {
+	cacheKey := fmt.Sprintf(
+		"products:list:%s:%s:%v:%v:%t",
+		strings.TrimSpace(strings.ToLower(filter.Query)),
+		strings.TrimSpace(strings.ToLower(filter.Category)),
+		filter.MinPrice,
+		filter.MaxPrice,
+		filter.OnlyInStock,
+	)
 	const cacheTTL = 10 * time.Minute
 
 	var products []models.Product
@@ -267,7 +349,13 @@ func (s *productService) List(ctx context.Context) ([]models.Product, error) {
 		return products, nil
 	}
 
-	products, err := s.repo.List(ctx)
+	products, err := s.repo.List(ctx, repository.ProductFilter{
+		Query:       filter.Query,
+		Category:    filter.Category,
+		MinPrice:    filter.MinPrice,
+		MaxPrice:    filter.MaxPrice,
+		OnlyInStock: filter.OnlyInStock,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -305,6 +393,13 @@ func (s *productService) Update(ctx context.Context, id uint, updates map[string
 	if description, ok := updates["description"].(string); ok && strings.TrimSpace(description) == "" {
 		return nil, errors.New("description cannot be empty")
 	}
+	if category, ok := updates["category"].(string); ok {
+		trimmed := strings.TrimSpace(strings.ToLower(category))
+		if trimmed == "" {
+			return nil, errors.New("category cannot be empty")
+		}
+		updates["category"] = trimmed
+	}
 	if price, ok := updates["price"].(float64); ok && price < 0 {
 		return nil, errors.New("price must be positive")
 	}
@@ -319,7 +414,7 @@ func (s *productService) Update(ctx context.Context, id uint, updates map[string
 
 	cacheKey := fmt.Sprintf("products:%d", id)
 	_ = s.cache.Delete(ctx, cacheKey)
-	_ = s.cache.Delete(ctx, "products:list")
+	_ = s.cache.Clear(ctx, "products:list:*")
 
 	return product, nil
 }
@@ -332,7 +427,176 @@ func (s *productService) Delete(ctx context.Context, id uint) error {
 
 	cacheKey := fmt.Sprintf("products:%d", id)
 	_ = s.cache.Delete(ctx, cacheKey)
-	_ = s.cache.Delete(ctx, "products:list")
+	_ = s.cache.Clear(ctx, "products:list:*")
 
+	return nil
+}
+
+func (s *cartService) GetByUserID(ctx context.Context, userID uint) ([]models.CartItem, error) {
+	cacheKey := fmt.Sprintf("cart:%d", userID)
+	const cacheTTL = 2 * time.Minute
+
+	var items []models.CartItem
+	if err := s.cache.Get(ctx, cacheKey, &items); err == nil {
+		return items, nil
+	}
+
+	items, err := s.cartRepo.GetByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.cache.Set(ctx, cacheKey, items, cacheTTL)
+	return items, nil
+}
+
+func (s *cartService) Sync(ctx context.Context, userID uint, lines []CartLineInput) ([]models.CartItem, error) {
+	normalized := make([]models.CartItem, 0, len(lines))
+
+	for i := range lines {
+		line := lines[i]
+		if line.ProductID == 0 || line.Quantity <= 0 {
+			continue
+		}
+
+		product, err := s.productRepo.FindByID(ctx, line.ProductID)
+		if err != nil {
+			return nil, fmt.Errorf("product %d not found", line.ProductID)
+		}
+
+		if line.Quantity > product.Stock {
+			return nil, fmt.Errorf("insufficient stock for product %d", line.ProductID)
+		}
+
+		normalized = append(normalized, models.CartItem{
+			UserID:    userID,
+			ProductID: line.ProductID,
+			Quantity:  line.Quantity,
+			Price:     product.Price,
+		})
+	}
+
+	items, err := s.cartRepo.ReplaceByUserID(ctx, userID, normalized)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.cache.Delete(ctx, fmt.Sprintf("cart:%d", userID))
+	return items, nil
+}
+
+func (s *orderService) Checkout(ctx context.Context, userID uint) (*CheckoutResult, error) {
+	items, err := s.cartRepo.GetByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(items) == 0 {
+		return nil, errors.New("cart is empty")
+	}
+
+	orderItems := make([]models.OrderItem, 0, len(items))
+	total := 0.0
+
+	for i := range items {
+		line := items[i]
+		product, err := s.productRepo.FindByID(ctx, line.ProductID)
+		if err != nil {
+			return nil, fmt.Errorf("product %d not found", line.ProductID)
+		}
+
+		if line.Quantity > product.Stock {
+			return nil, fmt.Errorf("insufficient stock for product %d", line.ProductID)
+		}
+
+		lineTotal := product.Price * float64(line.Quantity)
+		total += lineTotal
+
+		orderItems = append(orderItems, models.OrderItem{
+			ProductID:   product.ID,
+			ProductName: product.Name,
+			UnitPrice:   product.Price,
+			Quantity:    line.Quantity,
+			LineTotal:   lineTotal,
+		})
+	}
+
+	paymentRef := ""
+	clientSecret := ""
+	if strings.TrimSpace(s.stripeKey) != "" {
+		stripe.Key = s.stripeKey
+		params := &stripe.PaymentIntentParams{
+			Amount:   stripe.Int64(int64(math.Round(total * 100))),
+			Currency: stripe.String(string(stripe.CurrencyUSD)),
+		}
+		params.Metadata = map[string]string{
+			"user_id": fmt.Sprintf("%d", userID),
+		}
+
+		pi, err := paymentintent.New(params)
+		if err != nil {
+			return nil, fmt.Errorf("stripe checkout failed: %w", err)
+		}
+
+		paymentRef = pi.ID
+		clientSecret = pi.ClientSecret
+	}
+
+	for i := range orderItems {
+		if err := s.productRepo.DecreaseStock(ctx, orderItems[i].ProductID, orderItems[i].Quantity); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, fmt.Errorf("insufficient stock for product %d", orderItems[i].ProductID)
+			}
+			return nil, err
+		}
+	}
+
+	order := &models.Order{
+		UserID:          userID,
+		Status:          "created",
+		TotalAmount:     total,
+		PaymentProvider: "stripe",
+		PaymentRef:      paymentRef,
+		Items:           orderItems,
+	}
+
+	if err := s.orderRepo.Create(ctx, order); err != nil {
+		return nil, err
+	}
+
+	if err := s.cartRepo.ClearByUserID(ctx, userID); err != nil {
+		return nil, err
+	}
+
+	_ = s.cache.Delete(ctx, fmt.Sprintf("cart:%d", userID))
+	_ = s.cache.Clear(ctx, "products:list:*")
+
+	return &CheckoutResult{Order: order, ClientSecret: clientSecret}, nil
+}
+
+func (s *orderService) ListMyOrders(ctx context.Context, userID uint) ([]models.Order, error) {
+	return s.orderRepo.ListByUserID(ctx, userID)
+}
+
+func (s *orderService) ListAllOrders(ctx context.Context) ([]models.Order, error) {
+	return s.orderRepo.ListAll(ctx)
+}
+
+func (s *orderService) MarkPaidByPaymentRef(ctx context.Context, paymentRef string) error {
+	paymentRef = strings.TrimSpace(paymentRef)
+	if paymentRef == "" {
+		return errors.New("empty payment reference")
+	}
+
+	updated, err := s.orderRepo.MarkPaidByPaymentRef(ctx, paymentRef)
+	if err != nil {
+		return err
+	}
+
+	if !updated {
+		return nil
+	}
+
+	_ = s.cache.Clear(ctx, "orders:*")
 	return nil
 }

@@ -34,18 +34,25 @@ func main() {
 
 	userRepo := repository.NewUserRepo(db)
 	productRepo := repository.NewProductRepo(db)
+	cartRepo := repository.NewCartRepo(db)
+	orderRepo := repository.NewOrderRepo(db)
 
 	jwtSecret := getEnv("JWT_SECRET", "dev_secret")
+	stripeSecret := getEnv("STRIPE_SECRET_KEY", "")
+	stripeWebhookSecret := getEnv("STRIPE_WEBHOOK_SECRET", "")
 	authService := service.NewAuthService(userRepo, jwtSecret)
 	userService := service.NewUserService(userRepo, redisCache)
-	productService := service.NewProductService(productRepo, redisCache)
+	productService := service.NewProductService(productRepo, cartRepo, orderRepo, redisCache, stripeSecret)
+	cartService := service.NewCartService(productRepo, cartRepo, redisCache)
+	orderService := service.NewOrderService(productRepo, cartRepo, orderRepo, redisCache, stripeSecret)
 
 	authHandler := transport.NewHandler(authService, userService)
 	productHandler := transport.NewProductHandler(productService)
+	orderHandler := transport.NewOrderHandler(cartService, orderService, stripeWebhookSecret)
 	authMiddleware := middleware.NewAuthMiddleware(jwtSecret, userRepo)
 	requireRoles := middleware.RequireRoles
 
-	handler := router.NewRouter(authHandler, productHandler, authMiddleware, requireRoles)
+	handler := router.NewRouter(authHandler, productHandler, orderHandler, authMiddleware, requireRoles)
 
 	port := getEnv("APP_PORT", "8080")
 	server := &http.Server{

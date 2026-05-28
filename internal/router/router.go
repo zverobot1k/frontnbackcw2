@@ -9,7 +9,8 @@ import (
 	"somewebproject/internal/transport"
 )
 
-func NewRouter(authHandler *transport.Handler, productHandler *transport.ProductHandler, authMiddleware func(http.Handler) http.Handler, requireRoles func(...string) func(http.Handler) http.Handler) http.Handler {
+func NewRouter(authHandler *transport.Handler, productHandler *transport.ProductHandler, orderHandler *transport.OrderHandler, authMiddleware func(http.Handler) http.Handler, requireRoles func(...string) func(http.Handler) http.Handler) http.Handler {
+
 	mux := http.NewServeMux()
 
 	mux.Handle("GET /swagger/", httpSwagger.Handler(httpSwagger.URL("/swagger/doc.json")))
@@ -25,11 +26,18 @@ func NewRouter(authHandler *transport.Handler, productHandler *transport.Product
 	mux.Handle("PUT /api/users/{id}", chain(http.HandlerFunc(authHandler.UpdateUser), authMiddleware, requireRoles(service.RoleAdmin)))
 	mux.Handle("DELETE /api/users/{id}", chain(http.HandlerFunc(authHandler.BlockUser), authMiddleware, requireRoles(service.RoleAdmin)))
 
-	mux.Handle("POST /api/products", chain(http.HandlerFunc(productHandler.CreateProduct), authMiddleware, requireRoles(service.RoleSeller)))
-	mux.Handle("GET /api/products", chain(http.HandlerFunc(productHandler.ListProducts), authMiddleware))
-	mux.Handle("GET /api/products/{id}", chain(http.HandlerFunc(productHandler.GetProductByID), authMiddleware))
-	mux.Handle("PUT /api/products/{id}", chain(http.HandlerFunc(productHandler.UpdateProduct), authMiddleware, requireRoles(service.RoleSeller)))
+	mux.HandleFunc("GET /api/products", productHandler.ListProducts)
+	mux.HandleFunc("GET /api/products/{id}", productHandler.GetProductByID)
+	mux.Handle("POST /api/products", chain(http.HandlerFunc(productHandler.CreateProduct), authMiddleware, requireRoles(service.RoleAdmin)))
+	mux.Handle("PUT /api/products/{id}", chain(http.HandlerFunc(productHandler.UpdateProduct), authMiddleware, requireRoles(service.RoleAdmin)))
 	mux.Handle("DELETE /api/products/{id}", chain(http.HandlerFunc(productHandler.DeleteProduct), authMiddleware, requireRoles(service.RoleAdmin)))
+
+	mux.Handle("GET /api/cart", chain(http.HandlerFunc(orderHandler.GetCart), authMiddleware, requireRoles(service.RoleCustomer, service.RoleAdmin)))
+	mux.Handle("PUT /api/cart", chain(http.HandlerFunc(orderHandler.SyncCart), authMiddleware, requireRoles(service.RoleCustomer, service.RoleAdmin)))
+	mux.Handle("POST /api/orders/checkout", chain(http.HandlerFunc(orderHandler.Checkout), authMiddleware, requireRoles(service.RoleCustomer, service.RoleAdmin)))
+	mux.Handle("GET /api/orders", chain(http.HandlerFunc(orderHandler.ListMyOrders), authMiddleware, requireRoles(service.RoleCustomer, service.RoleAdmin)))
+	mux.Handle("GET /api/admin/orders", chain(http.HandlerFunc(orderHandler.ListAllOrders), authMiddleware, requireRoles(service.RoleAdmin)))
+	mux.Handle("POST /api/webhooks/stripe", http.HandlerFunc(orderHandler.StripeWebhook))
 
 	return mux
 }
